@@ -1,0 +1,68 @@
+FROM ubuntu:22.04
+LABEL maintainer="michael.banducci@sandc.com"
+LABEL project="IAR BXARM 9.30.1 on Ubuntu 22.04"
+#---
+# EdgeRestore (Chimera) CI builder
+#---
+
+# set timezone to chicago so it matches the license server
+ENV TZ=America/Chicago \
+    LC_ALL=C \
+    DEBIAN_FRONTEND="noninteractive"
+
+# This image expects the environment variable `artifactory_apikey` to be passed in when building.
+ARG artifactory_apikey
+
+# Ensure everything is up to date
+RUN apt update && apt install -y
+# Install tool dependencies
+RUN apt install -y wget curl apt-transport-https software-properties-common
+# Install project dependencies
+RUN apt install -y python3-pip python3-venv git lcov
+RUN python3 -m pip install lcov-cobertura
+
+# Install Powershell
+ADD https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb /tmp
+RUN cd /tmp && \
+    dpkg -i packages-microsoft-prod.deb && \
+    apt-get update && \
+    apt-get install -y powershell && \
+    ln -s /usr/bin/pwsh /usr/bin/powershell && \
+    rm -f packages-microsoft-prod.deb
+
+# Get and install LLVM 13
+RUN cd /tmp && \
+    wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+    add-apt-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-13 main" && \
+    apt update && apt install -y clang-format-13 && \
+    update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-13 200
+
+# Checkout and build Cppcheck 2.9
+RUN apt install -y cmake build-essential libpcre3 libpcre3-dev && \
+    cd /tmp && \
+    git clone https://github.com/danmar/cppcheck.git && \
+    cd cppcheck && \
+    git checkout tags/2.9 && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DHAVE_RULES=ON -DUSE_MATCHCOMPILER=ON -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build . --config release -j4 && \
+    cmake --install .
+
+# Get the Cppcheck add-on files from the dsp_team_tools repo (or artifactory?)
+# TODO: Add an SSH key (or use the existing SSH key for the DevOps pipeline)
+# RUN cd /tmp && \
+#     git clone https://bitbucket.org/sandcsw/dsp_team_tools.git && \
+#     cp -r dsp_team_tools/build-steps/cppcheck/addons /usr/local/share/Cppcheck/addons
+
+# Install IAR ARMBX
+RUN curl -H "X-JFrog-Art-Api:$artifactory_apikey" -X GET "https://sandc.jfrog.io/artifactory/embedded-generic/tools/bxarm-9.30.1.deb" -o /tmp/bxarm-9.30.1.deb
+RUN apt install -y sudo libsqlite3-0 libxml2 tzdata /tmp/bxarm-9.30.1.deb
+
+# Configure IAR license manager
+RUN /opt/iarsystems/bxarm/common/bin/lightlicensemanager init && \
+    /opt/iarsystems/bxarm/common/bin/lightlicensemanager setup --host CHI-IAR01.sandc.ws --product ARMBX.EW
+
+# Cleanup
+RUN apt clean autoclean autoremove && \
+    rm -rf /tmp/*.deb
